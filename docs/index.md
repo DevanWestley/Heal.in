@@ -3,29 +3,56 @@ layout: default
 title: Heal.in
 ---
 
-# Heal.in  
-## Kelompok TWaras
+<div align="center">
+
+# 🌿 Heal.in  
+### *Safe Space for Every Mind*  
+
+**Kelompok TWaras**
 
 ---
 
-## 👥 Anggota Kelompok
-- Nama Lengkap 1 – NIM
-- Nama Lengkap 2 – NIM
-- Nama Lengkap 3 – NIM
+</div>
 
 ---
 
-## 📌 Mata Kuliah
-Project Senior Project TI
+## 👥 Our Team
+
+| Role | Name | NIM |
+|------|------|------|
+| 👑 Ketua | **Devan Westley** | 23/522479/TK/57681 |
+| 🤝 Anggota | Haidar Faruqi Al Ghifari | 23/518252/TK/57023 |
+| 🤝 Anggota | Hayunitya Edadwi Pratita | 23/518670/TK/57134 |
 
 ---
 
-## 🏛 Instansi
+## 📚 Course Information
+**Project Senior Project TI**
+
+---
+
+## 🏛 Institution
 Departemen Teknologi Elektro dan Teknologi Informasi  
 Fakultas Teknik  
-Universitas Gadjah Mada
+Universitas Gadjah Mada  
 
 ---
 
-## 📖 Deskripsi Singkat Proyek
-Heal.in adalah platform konseling peer-support anonim berbasis komunitas yang bertujuan membantu generasi muda mendapatkan dukungan kesehatan mental yang terjangkau, aman, dan menjaga privasi pengguna.
+## 🌱 About Heal.in
+
+Heal.in merupakan platform konseling **peer-support anonim berbasis komunitas** yang dirancang untuk membantu generasi muda memperoleh dukungan kesehatan mental yang:
+
+- 🔐 Aman & menjaga privasi  
+- 💬 Mudah diakses  
+- 💸 Terjangkau  
+- 🤝 Berbasis komunitas  
+
+Kami percaya bahwa setiap individu berhak memiliki *safe space* untuk didengar dan dipahami.
+
+---
+
+<div align="center">
+
+### ✨ "You are not alone." ✨
+
+</div>
