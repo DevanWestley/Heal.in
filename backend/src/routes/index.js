@@ -122,10 +122,10 @@ router.post("/sessions/:id/messages", async (req, res, next) => {
       const risk = detectRisk(body);
       if (risk.flagged) {
         const rf = await pool.query(
-          `insert into risk_flags (session_id, message_id, level, score, reason)
-           values ($1, $2, $3, $4, $5)
-           returning id, level, score, reason, created_at`,
-          [session_id, message.id, risk.level, risk.score, risk.reason]
+          `insert into risk_flags (session_id, message_id, level, score, reasons)
+          values ($1, $2, $3::risk_level, $4, $5)
+          returning id, level, score, reasons, created_at`,
+          [session_id, message.id, risk.level, risk.score, risk.reasons]
         );
         risk_flag = rf.rows[0];
       }
@@ -147,12 +147,12 @@ router.get("/sessions/:id/messages", async (req, res, next) => {
 
     const q = await pool.query(
       `select
-         m.id, m.session_id, m.sender, m.body, m.created_at,
-         rf.level as risk_level, rf.score as risk_score, rf.reason as risk_reason
-       from messages m
-       left join risk_flags rf on rf.message_id = m.id
-       where m.session_id = $1
-       order by m.created_at asc`,
+        m.id, m.session_id, m.sender, m.body, m.created_at,
+        rf.level as risk_level, rf.score as risk_score, rf.reasons as risk_reasons
+      from messages m
+      left join risk_flags rf on rf.message_id = m.id
+      where m.session_id = $1
+      order by m.created_at asc`,
       [session_id]
     );
 

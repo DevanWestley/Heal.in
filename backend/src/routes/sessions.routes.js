@@ -77,11 +77,12 @@ router.post("/:id/messages", async (req, res, next) => {
     let flag = null;
     if (risk) {
       const insertFlagQ = `
-        insert into risk_flags (message_id, level, score, reasons)
-        values ($1, $2::risk_level, $3, $4)
+        insert into risk_flags (session_id, message_id, level, score, reasons)
+        values ($1, $2, $3::risk_level, $4, $5)
         returning *
       `;
       const flagR = await client.query(insertFlagQ, [
+        req.params.id,
         message.id,
         risk.level,
         risk.score,

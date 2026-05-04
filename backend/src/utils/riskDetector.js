@@ -9,19 +9,19 @@ function detectRisk(text = "") {
   const t = text.toLowerCase();
 
   let score = 0;
-  let reason = [];
+  let reasons = [];
 
   for (const k of HIGH) {
     if (t.includes(k)) {
       score += 80;
-      reason.push(`high:${k}`);
+      reasons.push(`high:${k}`);
     }
   }
 
   for (const k of MEDIUM) {
     if (t.includes(k)) {
       score += 40;
-      reason.push(`medium:${k}`);
+      reasons.push(`medium:${k}`);
     }
   }
 
@@ -34,7 +34,7 @@ function detectRisk(text = "") {
     flagged: level !== null,
     level,
     score,
-    reason: reason.join(", ")
+    reasons: reasons.join(", ")
   };
 }
 
