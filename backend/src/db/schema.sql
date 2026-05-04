@@ -39,33 +39,6 @@ CREATE TYPE public.sender_type AS ENUM (
 );
 
 -- =========================================
--- Functions
--- =========================================
-CREATE FUNCTION public.sync_messages_legacy_cols() RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-BEGIN
-  -- sinkron session_id <-> chat_session_id
-  IF NEW.session_id IS NULL AND NEW.chat_session_id IS NOT NULL THEN
-    NEW.session_id := NEW.chat_session_id;
-  END IF;
-  IF NEW.chat_session_id IS NULL AND NEW.session_id IS NOT NULL THEN
-    NEW.chat_session_id := NEW.session_id;
-  END IF;
-
-  -- sinkron body <-> message_content
-  IF NEW.body IS NULL AND NEW.message_content IS NOT NULL THEN
-    NEW.body := NEW.message_content;
-  END IF;
-  IF NEW.message_content IS NULL AND NEW.body IS NOT NULL THEN
-    NEW.message_content := NEW.body;
-  END IF;
-
-  RETURN NEW;
-END;
-$$;
-
--- =========================================
 -- Tables
 -- =========================================
 CREATE TABLE public.counselors (
@@ -252,13 +225,6 @@ CREATE INDEX idx_risk_flags_message_id ON public.risk_flags USING btree (message
 CREATE INDEX idx_risk_flags_session_id ON public.risk_flags USING btree (session_id);
 CREATE INDEX idx_sessions_counselor_id ON public.sessions USING btree (counselor_id);
 CREATE INDEX idx_sessions_user_id ON public.sessions USING btree (user_id);
-
--- =========================================
--- Triggers
--- =========================================
-CREATE TRIGGER trg_sync_messages_legacy_cols
-BEFORE INSERT OR UPDATE ON public.messages
-FOR EACH ROW EXECUTE FUNCTION public.sync_messages_legacy_cols();
 
 -- =========================================
 -- Foreign Keys
