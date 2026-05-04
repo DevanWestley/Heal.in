@@ -1,89 +1,336 @@
--- Healin backend schema (PostgreSQL)
--- clean/final version (no legacy columns)
--- run in pgAdmin / psql
+-- =========================================
+-- Schema: public
+-- PostgreSQL create-from-scratch
+-- =========================================
 
-BEGIN;
+SET statement_timeout = 0;
+SET lock_timeout = 0;
+SET idle_in_transaction_session_timeout = 0;
+SET transaction_timeout = 0;
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
+SET check_function_bodies = false;
+SET xmloption = content;
+SET client_min_messages = warning;
+SET row_security = off;
 
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS pgcrypto WITH SCHEMA public;
 
--- optional enum for risk flags
-DO $$
+-- =========================================
+-- Types
+-- =========================================
+CREATE TYPE public.chat_session_status AS ENUM (
+    'waiting',
+    'matched',
+    'active',
+    'closed'
+);
+
+CREATE TYPE public.risk_level AS ENUM (
+    'low',
+    'medium',
+    'high'
+);
+
+CREATE TYPE public.sender_type AS ENUM (
+    'user',
+    'counselor',
+    'system'
+);
+
+-- =========================================
+-- Functions
+-- =========================================
+CREATE FUNCTION public.sync_messages_legacy_cols() RETURNS trigger
+LANGUAGE plpgsql
+AS $$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'risk_level') THEN
-    CREATE TYPE risk_level AS ENUM ('low', 'medium', 'high');
+  -- sinkron session_id <-> chat_session_id
+  IF NEW.session_id IS NULL AND NEW.chat_session_id IS NOT NULL THEN
+    NEW.session_id := NEW.chat_session_id;
   END IF;
-END$$;
+  IF NEW.chat_session_id IS NULL AND NEW.session_id IS NOT NULL THEN
+    NEW.chat_session_id := NEW.session_id;
+  END IF;
 
--- USERS (anonymous users)
-CREATE TABLE IF NOT EXISTS users (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  display_name TEXT NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  -- sinkron body <-> message_content
+  IF NEW.body IS NULL AND NEW.message_content IS NOT NULL THEN
+    NEW.body := NEW.message_content;
+  END IF;
+  IF NEW.message_content IS NULL AND NEW.body IS NOT NULL THEN
+    NEW.message_content := NEW.body;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+
+-- =========================================
+-- Tables
+-- =========================================
+CREATE TABLE public.counselors (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    name text,
+    email text,
+    specialization text,
+    is_active boolean DEFAULT true NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    display_name text,
+    is_available boolean DEFAULT true NOT NULL
 );
 
--- COUNSELORS
-CREATE TABLE IF NOT EXISTS counselors (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  display_name TEXT NOT NULL,
-  is_available BOOLEAN NOT NULL DEFAULT true,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+CREATE TABLE public.counselor_status (
+    counselor_id uuid NOT NULL,
+    is_available boolean DEFAULT true NOT NULL,
+    max_sessions integer DEFAULT 3 NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
--- SESSIONS
-CREATE TABLE IF NOT EXISTS sessions (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  counselor_id UUID NULL REFERENCES counselors(id) ON DELETE SET NULL,
-  topic TEXT NULL,
-  status TEXT NOT NULL DEFAULT 'waiting',
-  matched_at TIMESTAMPTZ NULL,
-  closed_at TIMESTAMPTZ NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  CONSTRAINT sessions_status_check CHECK (status IN ('waiting','matched','closed'))
+CREATE TABLE public.users (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    anon_handle text,
+    username text,
+    email text,
+    password_hash text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT users_identity_check CHECK (((anon_handle IS NOT NULL) OR (username IS NOT NULL) OR (email IS NOT NULL)))
 );
 
--- MESSAGES
-CREATE TABLE IF NOT EXISTS messages (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  sender TEXT NOT NULL,
-  sender_id UUID NULL,
-  body TEXT NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  CONSTRAINT messages_sender_check CHECK (sender IN ('user','counselor','system'))
+CREATE TABLE public.sessions (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    user_id uuid NOT NULL,
+    topic text,
+    status text DEFAULT 'waiting'::text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    counselor_id uuid,
+    matched_at timestamp with time zone,
+    closed_at timestamp with time zone
 );
 
--- RISK FLAGS (1 message can have max 1 flag)
-CREATE TABLE IF NOT EXISTS risk_flags (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  message_id UUID NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,
-  level risk_level NOT NULL,
-  score NUMERIC(5,2) NOT NULL,
-  reasons TEXT[] NOT NULL DEFAULT '{}',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+CREATE TABLE public.messages (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    sender public.sender_type NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    session_id uuid,
+    body text,
+    sender_id uuid,
+    CONSTRAINT messages_sender_check CHECK ((sender = ANY (ARRAY['user'::public.sender_type, 'counselor'::public.sender_type, 'system'::public.sender_type])))
 );
 
--- REPORTS
-CREATE TABLE IF NOT EXISTS reports (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-  reporter_user_id UUID NULL REFERENCES users(id) ON DELETE SET NULL,
-  category TEXT NOT NULL,
-  detail TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'open',
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  CONSTRAINT reports_status_check CHECK (status IN ('open','reviewed','resolved'))
+CREATE TABLE public.reports (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    reporter_user_id uuid,
+    reporter_counselor_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    session_id uuid,
+    category text,
+    detail text,
+    status text DEFAULT 'open'::text NOT NULL
 );
 
+CREATE TABLE public.sensitive_words (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    word text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+CREATE TABLE public.message_sensitive_words (
+    message_id uuid NOT NULL,
+    sensitive_word_id uuid NOT NULL
+);
+
+CREATE TABLE public.risk_flags (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    message_id uuid NOT NULL,
+    level public.risk_level NOT NULL,
+    score numeric(5,2) DEFAULT 0.00 NOT NULL,
+    reasons text[],
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    session_id uuid,
+    CONSTRAINT risk_flags_level_check CHECK ((level = ANY (ARRAY['low'::public.risk_level, 'medium'::public.risk_level, 'high'::public.risk_level])))
+);
+
+CREATE TABLE public.escalations (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    session_id uuid,
+    message_id uuid,
+    level text NOT NULL,
+    status text DEFAULT 'open'::text NOT NULL,
+    created_at timestamp with time zone DEFAULT now()
+);
+
+CREATE TABLE public.session_summaries (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    session_id uuid NOT NULL,
+    ai_summary text NOT NULL,
+    counselor_suggestion text,
+    final_summary text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+CREATE TABLE public.session_topics (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    session_id uuid,
+    label text NOT NULL,
+    confidence numeric(4,2) NOT NULL,
+    created_at timestamp with time zone DEFAULT now()
+);
+
+CREATE TABLE public.user_summaries (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    user_id uuid NOT NULL,
+    ai_summary text NOT NULL,
+    counselor_suggestion text,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+-- =========================================
+-- Primary Keys / Unique
+-- =========================================
+ALTER TABLE ONLY public.counselors
+    ADD CONSTRAINT counselors_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.counselors
+    ADD CONSTRAINT counselors_email_key UNIQUE (email);
+
+ALTER TABLE ONLY public.counselor_status
+    ADD CONSTRAINT counselor_status_pkey PRIMARY KEY (counselor_id);
+
+ALTER TABLE ONLY public.users
+    ADD CONSTRAINT users_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.users
+    ADD CONSTRAINT users_anon_handle_key UNIQUE (anon_handle);
+
+ALTER TABLE ONLY public.users
+    ADD CONSTRAINT users_username_key UNIQUE (username);
+
+ALTER TABLE ONLY public.users
+    ADD CONSTRAINT users_email_key UNIQUE (email);
+
+ALTER TABLE ONLY public.sessions
+    ADD CONSTRAINT sessions_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.messages
+    ADD CONSTRAINT messages_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.reports
+    ADD CONSTRAINT reports_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.sensitive_words
+    ADD CONSTRAINT sensitive_words_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.sensitive_words
+    ADD CONSTRAINT sensitive_words_word_key UNIQUE (word);
+
+ALTER TABLE ONLY public.message_sensitive_words
+    ADD CONSTRAINT message_sensitive_words_pkey PRIMARY KEY (message_id, sensitive_word_id);
+
+ALTER TABLE ONLY public.risk_flags
+    ADD CONSTRAINT risk_flags_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.escalations
+    ADD CONSTRAINT escalations_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.session_summaries
+    ADD CONSTRAINT session_summaries_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.session_topics
+    ADD CONSTRAINT session_topics_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.user_summaries
+    ADD CONSTRAINT user_summaries_pkey PRIMARY KEY (id);
+
+-- =========================================
 -- Indexes
-CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_counselor_id ON sessions(counselor_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
+-- =========================================
+CREATE INDEX idx_messages_session_id ON public.messages USING btree (session_id);
+CREATE INDEX idx_reports_created_at ON public.reports USING btree (created_at);
+CREATE INDEX idx_risk_flags_level ON public.risk_flags USING btree (level);
+CREATE INDEX idx_risk_flags_message_id ON public.risk_flags USING btree (message_id);
+CREATE INDEX idx_risk_flags_session_id ON public.risk_flags USING btree (session_id);
+CREATE INDEX idx_sessions_counselor_id ON public.sessions USING btree (counselor_id);
+CREATE INDEX idx_sessions_user_id ON public.sessions USING btree (user_id);
 
-CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id);
-CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
+-- =========================================
+-- Triggers
+-- =========================================
+CREATE TRIGGER trg_sync_messages_legacy_cols
+BEFORE INSERT OR UPDATE ON public.messages
+FOR EACH ROW EXECUTE FUNCTION public.sync_messages_legacy_cols();
 
-CREATE INDEX IF NOT EXISTS idx_reports_session_id ON reports(session_id);
-CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status);
+-- =========================================
+-- Foreign Keys
+-- =========================================
+ALTER TABLE ONLY public.counselor_status
+    ADD CONSTRAINT counselor_status_counselor_id_fkey
+    FOREIGN KEY (counselor_id) REFERENCES public.counselors(id) ON DELETE CASCADE;
 
-COMMIT;
+ALTER TABLE ONLY public.sessions
+    ADD CONSTRAINT fk_sessions_user
+    FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.sessions
+    ADD CONSTRAINT fk_sessions_counselor
+    FOREIGN KEY (counselor_id) REFERENCES public.counselors(id) ON DELETE SET NULL;
+
+ALTER TABLE ONLY public.messages
+    ADD CONSTRAINT fk_messages_session
+    FOREIGN KEY (session_id) REFERENCES public.sessions(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.reports
+    ADD CONSTRAINT fk_reports_reporter
+    FOREIGN KEY (reporter_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+ALTER TABLE ONLY public.reports
+    ADD CONSTRAINT reports_reporter_user_id_fkey
+    FOREIGN KEY (reporter_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+ALTER TABLE ONLY public.reports
+    ADD CONSTRAINT reports_reporter_counselor_id_fkey
+    FOREIGN KEY (reporter_counselor_id) REFERENCES public.counselors(id) ON DELETE SET NULL;
+
+ALTER TABLE ONLY public.reports
+    ADD CONSTRAINT fk_reports_session
+    FOREIGN KEY (session_id) REFERENCES public.sessions(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.message_sensitive_words
+    ADD CONSTRAINT message_sensitive_words_message_id_fkey
+    FOREIGN KEY (message_id) REFERENCES public.messages(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.message_sensitive_words
+    ADD CONSTRAINT message_sensitive_words_sensitive_word_id_fkey
+    FOREIGN KEY (sensitive_word_id) REFERENCES public.sensitive_words(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.risk_flags
+    ADD CONSTRAINT fk_risk_flags_message
+    FOREIGN KEY (message_id) REFERENCES public.messages(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.risk_flags
+    ADD CONSTRAINT risk_flags_message_id_fkey
+    FOREIGN KEY (message_id) REFERENCES public.messages(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.risk_flags
+    ADD CONSTRAINT fk_risk_flags_session
+    FOREIGN KEY (session_id) REFERENCES public.sessions(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.escalations
+    ADD CONSTRAINT escalations_session_id_fkey
+    FOREIGN KEY (session_id) REFERENCES public.sessions(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.escalations
+    ADD CONSTRAINT escalations_message_id_fkey
+    FOREIGN KEY (message_id) REFERENCES public.messages(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.session_summaries
+    ADD CONSTRAINT session_summaries_session_id_fkey
+    FOREIGN KEY (session_id) REFERENCES public.sessions(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.session_topics
+    ADD CONSTRAINT session_topics_session_id_fkey
+    FOREIGN KEY (session_id) REFERENCES public.sessions(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.user_summaries
+    ADD CONSTRAINT user_summaries_user_id_fkey
+    FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
