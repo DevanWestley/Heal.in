@@ -1,17 +1,27 @@
 const express = require("express");
+const cors = require("cors");
 
 const healthRoutes = require("./routes/health.routes");
 const usersRoutes = require("./routes/users.routes");
 const sessionsRoutes = require("./routes/sessions.routes");
+const authRoutes = require("./routes/auth.routes");
 const errorHandler = require("./middleware/errorHandler");
 
 const app = express();
 
+// Enable CORS for frontend
+app.use(cors({
+  origin: process.env.FRONTEND_URL || "http://localhost:3000",
+  credentials: true
+}));
+
 app.use(express.json({ limit: "1mb" }));
 
-app.use(healthRoutes);
-app.use("/users", usersRoutes);
-app.use("/sessions", sessionsRoutes);
+// Add /api prefix to all routes
+app.use("/api", healthRoutes);
+app.use("/api/auth", authRoutes);
+app.use("/api/users", usersRoutes);
+app.use("/api/sessions", sessionsRoutes);
 
 // 404
 app.use((req, res) => {

@@ -1,8 +1,3 @@
--- =========================================
--- Schema: public
--- PostgreSQL create-from-scratch
--- =========================================
-
 SET statement_timeout = 0;
 SET lock_timeout = 0;
 SET idle_in_transaction_session_timeout = 0;
@@ -49,7 +44,8 @@ CREATE TABLE public.counselors (
     is_active boolean DEFAULT true NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     display_name text,
-    is_available boolean DEFAULT true NOT NULL
+    is_available boolean DEFAULT true NOT NULL,
+    password_hash text
 );
 
 CREATE TABLE public.counselor_status (
@@ -65,6 +61,7 @@ CREATE TABLE public.users (
     username text,
     email text,
     password_hash text,
+    role text NOT NULL DEFAULT 'user',
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT users_identity_check CHECK (((anon_handle IS NOT NULL) OR (username IS NOT NULL) OR (email IS NOT NULL)))
 );
@@ -300,3 +297,15 @@ ALTER TABLE ONLY public.session_topics
 ALTER TABLE ONLY public.user_summaries
     ADD CONSTRAINT user_summaries_user_id_fkey
     FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+-- =========================================
+-- Seed Data
+-- =========================================
+-- Default admin user (username: admin, password: 1234567890)
+INSERT INTO public.users (username, email, password_hash, role)
+VALUES (
+    'admin',
+    'admin@healin.com',
+    '$2b$10$VCtTO3xNC5LcGg45ApZZ2u56.YTHmRGcToXYK/dFGCFkRR05.SCCe',
+    'admin'
+);

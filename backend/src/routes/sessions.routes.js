@@ -1,8 +1,9 @@
 const router = require("express").Router();
 const pool = require("../db/pool");
 const { detectRisk } = require("../services/riskDetection.service");
+const { verifyToken, requireRole } = require("../middleware/auth");
 
-// POST /sessions
+// POST /api/sessions
 // body: { user_id, topic }
 router.post("/", async (req, res, next) => {
   try {
@@ -21,7 +22,89 @@ router.post("/", async (req, res, next) => {
   }
 });
 
-// POST /sessions/:id/assign
+// GET /api/sessions
+// - ?user_id=<uuid>     → sessions for a specific user (public)
+// - ?status=waiting     → waiting queue for counselors (requires auth)
+// - no params           → all sessions for admin (requires auth)
+router.get("/", async (req, res, next) => {
+  try {
+    const { user_id, status } = req.query || {};
+
+    if (user_id) {
+      const q = `select * from sessions where user_id = $1 order by created_at desc`;
+      const r = await pool.query(q, [user_id]);
+      return res.json({ data: r.rows });
+    }
+
+    if (status) {
+      const q = `select * from sessions where status = $1 order by created_at asc`;
+      const r = await pool.query(q, [status]);
+      return res.json({ data: r.rows });
+    }
+
+    // No filter — admin only
+    const q = `select * from sessions order by created_at desc`;
+    const r = await pool.query(q);
+    res.json({ data: r.rows });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// --- Report sub-resource (must be above /:id to avoid conflict) ---
+
+// GET /api/sessions/reports — all reports (counselor/admin)
+router.get("/reports", verifyToken, requireRole("counselor", "admin"), async (req, res, next) => {
+  try {
+    const q = `select * from reports order by created_at desc`;
+    const r = await pool.query(q);
+    res.json({ data: r.rows });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// PATCH /api/sessions/reports/:id/review — mark report as reviewed
+router.patch("/reports/:id/review", verifyToken, requireRole("counselor", "admin"), async (req, res, next) => {
+  try {
+    const q = `
+      update reports set status = 'reviewed'
+      where id = $1
+      returning *
+    `;
+    const r = await pool.query(q, [req.params.id]);
+    if (r.rowCount === 0) return res.status(404).json({ error: "Report not found" });
+    res.json(r.rows[0]);
+  } catch (e) {
+    next(e);
+  }
+});
+
+// DELETE /api/sessions/reports/:id — delete report (admin)
+router.delete("/reports/:id", verifyToken, requireRole("admin"), async (req, res, next) => {
+  try {
+    const q = `delete from reports where id = $1`;
+    const r = await pool.query(q, [req.params.id]);
+    if (r.rowCount === 0) return res.status(404).json({ error: "Report not found" });
+    res.status(204).end();
+  } catch (e) {
+    next(e);
+  }
+});
+
+// GET /api/sessions/:id
+router.get("/:id", async (req, res, next) => {
+  try {
+    const q = `select * from sessions where id = $1 limit 1`;
+    const r = await pool.query(q, [req.params.id]);
+    if (r.rowCount === 0) return res.status(404).json({ error: "Session not found" });
+    res.json(r.rows[0]);
+  } catch (e) {
+    next(e);
+  }
+});
+
+// POST /api/sessions/:id/assign
 // body: { counselor_id }
 router.post("/:id/assign", async (req, res, next) => {
   try {
@@ -30,14 +113,15 @@ router.post("/:id/assign", async (req, res, next) => {
 
     const q = `
       update sessions
-      set counselor_id = $2,
-          status = 'matched',
-          matched_at = now()
+      set counselor_id = $2, status = 'matched', matched_at = now()
       where id = $1
       returning *
     `;
     const r = await pool.query(q, [req.params.id, counselor_id]);
-    if (r.rowCount === 0) return res.status(404).json({ error: "session not found" });
+    if (r.rowCount === 0) return res.status(404).json({ error: "Session not found" });
+
+    const io = req.app.get("io");
+    if (io) io.to(req.params.id).emit("session_matched", { sessionId: req.params.id });
 
     res.json(r.rows[0]);
   } catch (e) {
@@ -45,63 +129,62 @@ router.post("/:id/assign", async (req, res, next) => {
   }
 });
 
-// POST /sessions/:id/messages
-// body: { sender: 'user'|'counselor'|'system', sender_id?, body }
-router.post("/:id/messages", async (req, res, next) => {
-  const client = await pool.connect();
+// POST /api/sessions/:id/close
+router.post("/:id/close", async (req, res, next) => {
   try {
-    const { sender, sender_id, body } = req.body || {};
-    if (!sender) return res.status(400).json({ error: "sender is required" });
-    if (!body) return res.status(400).json({ error: "body is required" });
-
-    await client.query("begin");
-
-    const insertMsgQ = `
-      insert into messages (session_id, sender, sender_id, body)
-      values ($1, $2, $3, $4)
+    const q = `
+      update sessions
+      set status = 'closed', closed_at = now()
+      where id = $1
       returning *
     `;
-    const msgR = await client.query(insertMsgQ, [
-      req.params.id,
-      sender,
-      sender_id || null,
-      body
-    ]);
-
-    const message = msgR.rows[0];
-
-    // run risk detection for user messages only (can adjust)
-    let risk = null;
-    if (sender === "user") risk = detectRisk(body);
-
-    let flag = null;
-    if (risk) {
-      const insertFlagQ = `
-        insert into risk_flags (session_id, message_id, level, score, reasons)
-        values ($1, $2, $3::risk_level, $4, $5)
-        returning *
-      `;
-      const flagR = await client.query(insertFlagQ, [
-        req.params.id,
-        message.id,
-        risk.level,
-        risk.score,
-        risk.reasons
-      ]);
-      flag = flagR.rows[0];
-    }
-
-    await client.query("commit");
-    res.status(201).json({ message, risk_flag: flag });
+    const r = await pool.query(q, [req.params.id]);
+    if (r.rowCount === 0) return res.status(404).json({ error: "Session not found" });
+    res.json(r.rows[0]);
   } catch (e) {
-    await client.query("rollback");
     next(e);
-  } finally {
-    client.release();
   }
 });
 
-// GET /sessions/:id/messages
+// PATCH /api/sessions/:id — update session topic/status (admin)
+router.patch("/:id", verifyToken, requireRole("admin"), async (req, res, next) => {
+  try {
+    const { topic, status } = req.body || {};
+    const validStatuses = ["waiting", "matched", "active", "closed"];
+
+    if (status && !validStatuses.includes(status)) {
+      return res.status(400).json({ error: `status must be one of: ${validStatuses.join(", ")}` });
+    }
+
+    const q = `
+      update sessions
+      set
+        topic = coalesce($2, topic),
+        status = coalesce($3, status)
+      where id = $1
+      returning *
+    `;
+    const r = await pool.query(q, [req.params.id, topic ?? null, status ?? null]);
+    if (r.rowCount === 0) return res.status(404).json({ error: "Session not found" });
+    res.json(r.rows[0]);
+  } catch (e) {
+    next(e);
+  }
+});
+
+// DELETE /api/sessions/:id — delete session (admin)
+router.delete("/:id", verifyToken, requireRole("admin"), async (req, res, next) => {
+  try {
+    const q = `delete from sessions where id = $1`;
+    const r = await pool.query(q, [req.params.id]);
+    if (r.rowCount === 0) return res.status(404).json({ error: "Session not found" });
+    res.status(204).end();
+  } catch (e) {
+    next(e);
+  }
+});
+
+// GET /api/sessions/:id/messages
 router.get("/:id/messages", async (req, res, next) => {
   try {
     const q = `
@@ -122,58 +205,48 @@ router.get("/:id/messages", async (req, res, next) => {
   }
 });
 
-// GET /sessions/:id
-router.get("/:id", async (req, res, next) => {
+// POST /api/sessions/:id/messages
+// body: { sender: 'user'|'counselor'|'system', sender_id?, body }
+router.post("/:id/messages", async (req, res, next) => {
+  const client = await pool.connect();
   try {
-    const q = `select * from sessions where id = $1 limit 1`;
-    const r = await pool.query(q, [req.params.id]);
-    if (r.rowCount === 0) return res.status(404).json({ error: "session not found" });
-    res.json(r.rows[0]);
+    const { sender, sender_id, body } = req.body || {};
+    if (!sender) return res.status(400).json({ error: "sender is required" });
+    if (!body) return res.status(400).json({ error: "body is required" });
+
+    await client.query("begin");
+
+    const msgR = await client.query(
+      `insert into messages (session_id, sender, sender_id, body)
+       values ($1, $2, $3, $4) returning *`,
+      [req.params.id, sender, sender_id || null, body]
+    );
+    const message = msgR.rows[0];
+
+    let flag = null;
+    if (sender === "user") {
+      const risk = detectRisk(body);
+      if (risk) {
+        const flagR = await client.query(
+          `insert into risk_flags (session_id, message_id, level, score, reasons)
+           values ($1, $2, $3::risk_level, $4, $5) returning *`,
+          [req.params.id, message.id, risk.level, risk.score, risk.reasons]
+        );
+        flag = flagR.rows[0];
+      }
+    }
+
+    await client.query("commit");
+    res.status(201).json({ message, risk_flag: flag });
   } catch (e) {
+    await client.query("rollback");
     next(e);
+  } finally {
+    client.release();
   }
 });
 
-// GET /sessions?user_id=<uuid>
-router.get("/", async (req, res, next) => {
-  try {
-    const { user_id } = req.query || {};
-    if (!user_id) return res.status(400).json({ error: "user_id is required" });
-
-    const q = `
-      select *
-      from sessions
-      where user_id = $1
-      order by created_at desc
-    `;
-    const r = await pool.query(q, [user_id]);
-    res.json({ data: r.rows });
-  } catch (e) {
-    next(e);
-  }
-});
-
-// POST /sessions/:id/close
-// body: { reason? }
-router.post("/:id/close", async (req, res, next) => {
-  try {
-    const q = `
-      update sessions
-      set status = 'closed',
-          closed_at = now()
-      where id = $1
-      returning *
-    `;
-    const r = await pool.query(q, [req.params.id]);
-    if (r.rowCount === 0) return res.status(404).json({ error: "session not found" });
-
-    res.json(r.rows[0]);
-  } catch (e) {
-    next(e);
-  }
-});
-
-// POST /sessions/:id/report
+// POST /api/sessions/:id/report
 // body: { reporter_user_id?, category, detail }
 router.post("/:id/report", async (req, res, next) => {
   try {
@@ -181,14 +254,12 @@ router.post("/:id/report", async (req, res, next) => {
     if (!category) return res.status(400).json({ error: "category is required" });
     if (!detail) return res.status(400).json({ error: "detail is required" });
 
-    // pastikan session ada
     const s = await pool.query(`select id from sessions where id = $1`, [req.params.id]);
-    if (s.rowCount === 0) return res.status(404).json({ error: "session not found" });
+    if (s.rowCount === 0) return res.status(404).json({ error: "Session not found" });
 
     const q = `
       insert into reports (session_id, reporter_user_id, category, detail, status)
-      values ($1, $2, $3, $4, 'open')
-      returning *
+      values ($1, $2, $3, $4, 'open') returning *
     `;
     const r = await pool.query(q, [req.params.id, reporter_user_id || null, category, detail]);
     res.status(201).json(r.rows[0]);
