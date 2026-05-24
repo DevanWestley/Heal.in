@@ -1,0 +1,51 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: healin_postgres
+    restart: always
+
+    environment:
+      POSTGRES_DB: senpro
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: haidar
+
+    ports:
+      - "5432:5432"
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docs/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+
+  backend:
+    build:
+      context: ./backend
+
+    container_name: healin_backend
+    restart: always
+
+    depends_on:
+      - postgres
+
+    ports:
+      - "3000:3000"
+
+    environment:
+      PORT: 3000
+
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: senpro
+      DB_USER: postgres
+      DB_PASSWORD: haidar
+      DB_SSL: "false"
+
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+
+    command: npm run dev
+
+volumes:
+  postgres_data:
