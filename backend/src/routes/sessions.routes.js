@@ -1,6 +1,7 @@
 const router = require("express").Router();
 const pool = require("../db/pool");
 const { detectRisk } = require("../services/riskDetection.service");
+const { summarizeSession } = require("../services/summarize.service");
 const { verifyToken, requireRole } = require("../middleware/auth");
 
 // POST /api/sessions
@@ -225,7 +226,7 @@ router.post("/:id/messages", async (req, res, next) => {
 
     let flag = null;
     if (sender === "user") {
-      const risk = detectRisk(body);
+      const risk = await detectRisk(body);
       if (risk) {
         const flagR = await client.query(
           `insert into risk_flags (session_id, message_id, level, score, reasons)
@@ -237,12 +238,57 @@ router.post("/:id/messages", async (req, res, next) => {
     }
 
     await client.query("commit");
-    res.status(201).json({ message, risk_flag: flag });
+
+    const enrichedMessage = {
+      ...message,
+      risk_level: flag?.level ?? null,
+      risk_score: flag?.score ?? null,
+      risk_reasons: flag?.reasons ?? null,
+    };
+
+    res.status(201).json({ message: enrichedMessage, risk_flag: flag });
   } catch (e) {
     await client.query("rollback");
     next(e);
   } finally {
     client.release();
+  }
+});
+
+// POST /api/sessions/:id/summarize — generate AI summary via Gemini
+router.post("/:id/summarize", async (req, res, next) => {
+  try {
+    const sessionCheck = await pool.query(`select id, status from sessions where id = $1`, [req.params.id]);
+    if (sessionCheck.rowCount === 0) return res.status(404).json({ error: "Session not found" });
+
+    const msgResult = await pool.query(
+      `select sender, body from messages where session_id = $1 order by created_at asc`,
+      [req.params.id]
+    );
+    const messages = msgResult.rows;
+
+    try {
+      const result = await summarizeSession(messages);
+      await pool.query(
+        `update sessions set topic = coalesce($2, topic) where id = $1`,
+        [req.params.id, result.topic]
+      );
+      res.json(result);
+    } catch (aiErr) {
+      const msg = aiErr.message || "";
+      if (msg.includes("503") || msg.includes("Service Unavailable")) {
+        return res.status(503).json({ error: "Layanan AI sedang sibuk, coba lagi dalam beberapa detik." });
+      }
+      if (msg.includes("429") || msg.includes("quota")) {
+        return res.status(429).json({ error: "Quota Gemini habis. Cek pengaturan billing di Google AI Studio." });
+      }
+      if (msg.includes("API_KEY") || msg.includes("not configured")) {
+        return res.status(501).json({ error: "GEMINI_API_KEY belum dikonfigurasi." });
+      }
+      throw aiErr;
+    }
+  } catch (e) {
+    next(e);
   }
 });
 

@@ -38,7 +38,7 @@ function registerSocketHandlers(io) {
 
         let flag = null;
         if (sender === "user") {
-          const risk = detectRisk(body);
+          const risk = await detectRisk(body);
           if (risk) {
             const flagR = await client.query(
               `insert into risk_flags (session_id, message_id, level, score, reasons)
@@ -51,8 +51,15 @@ function registerSocketHandlers(io) {
 
         await client.query("commit");
 
-        // Broadcast ke semua yang ada di room (termasuk pengirim)
-        io.to(sessionId).emit("new_message", { message, risk_flag: flag });
+        // Merge risk data ke message agar frontend bisa render risk badge tanpa lookup terpisah
+        const enrichedMessage = {
+          ...message,
+          risk_level: flag?.level ?? null,
+          risk_score: flag?.score ?? null,
+          risk_reasons: flag?.reasons ?? null,
+        };
+
+        io.to(sessionId).emit("new_message", { message: enrichedMessage, risk_flag: flag });
       } catch (e) {
         await client.query("rollback");
         console.error("[socket] send_message error:", e.message);
