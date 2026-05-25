@@ -29,6 +29,23 @@ function registerSocketHandlers(io) {
       try {
         await client.query("begin");
 
+        // Counselors must be the assigned counselor for this session
+        if (sender === "counselor" && sender_id) {
+          const sessionRow = await client.query(
+            `select counselor_id from sessions where id = $1`,
+            [sessionId]
+          );
+          if (
+            sessionRow.rowCount === 0 ||
+            sessionRow.rows[0].counselor_id !== sender_id
+          ) {
+            socket.emit("error", { message: "Not assigned to this session" });
+            await client.query("rollback");
+            client.release();
+            return;
+          }
+        }
+
         const msgR = await client.query(
           `insert into messages (session_id, sender, sender_id, body)
            values ($1, $2, $3, $4) returning *`,
@@ -46,6 +63,14 @@ function registerSocketHandlers(io) {
               [sessionId, message.id, risk.level, risk.score, risk.reasons]
             );
             flag = flagR.rows[0];
+
+            if (risk.level === "high") {
+              await client.query(
+                `insert into escalations (session_id, message_id, level, status)
+                 values ($1, $2, 'high', 'open')`,
+                [sessionId, message.id]
+              );
+            }
           }
         }
 

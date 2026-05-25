@@ -7,6 +7,7 @@ const healthRoutes = require("./routes/health.routes");
 const usersRoutes = require("./routes/users.routes");
 const sessionsRoutes = require("./routes/sessions.routes");
 const authRoutes = require("./routes/auth.routes");
+const counselorsRoutes = require("./routes/counselors.routes");
 const errorHandler = require("./middleware/errorHandler");
 
 const app = express();
@@ -58,6 +59,7 @@ app.use("/api", healthRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/users", usersRoutes);
 app.use("/api/sessions", sessionsRoutes);
+app.use("/api/counselors", counselorsRoutes);
 
 // 404
 app.use((req, res) => {

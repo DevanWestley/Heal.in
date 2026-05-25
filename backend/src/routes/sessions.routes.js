@@ -38,8 +38,31 @@ router.get("/", async (req, res, next) => {
     }
 
     if (status) {
-      const q = `select * from sessions where status = $1 order by created_at asc`;
+      const q = `
+        select s.*,
+          count(e.id) filter (where e.status = 'open') as open_escalations
+        from sessions s
+        left join escalations e on e.session_id = s.id
+        where s.status = $1
+        group by s.id
+        order by open_escalations desc, s.created_at asc
+      `;
       const r = await pool.query(q, [status]);
+      return res.json({ data: r.rows });
+    }
+
+    const { counselor_id } = req.query;
+    if (counselor_id) {
+      const q = `
+        select s.*,
+          count(rf.id) filter (where rf.level = 'high') as high_risk_count
+        from sessions s
+        left join risk_flags rf on rf.session_id = s.id
+        where s.counselor_id = $1 and s.status != 'closed'
+        group by s.id
+        order by s.matched_at desc
+      `;
+      const r = await pool.query(q, [counselor_id]);
       return res.json({ data: r.rows });
     }
 
@@ -52,11 +75,57 @@ router.get("/", async (req, res, next) => {
   }
 });
 
+// GET /api/sessions/escalations — open escalations (admin)
+router.get("/escalations", verifyToken, requireRole("admin"), async (req, res, next) => {
+  try {
+    const q = `
+      select e.*,
+        s.status as session_status,
+        s.counselor_id,
+        m.body as message_body
+      from escalations e
+      join sessions s on e.session_id = s.id
+      left join messages m on e.message_id = m.id
+      where e.status = 'open'
+      order by e.created_at desc
+    `;
+    const r = await pool.query(q);
+    res.json({ data: r.rows });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// PATCH /api/sessions/escalations/:id/resolve — resolve escalation (admin)
+router.patch("/escalations/:id/resolve", verifyToken, requireRole("admin"), async (req, res, next) => {
+  try {
+    const r = await pool.query(
+      `update escalations set status = 'resolved' where id = $1 returning *`,
+      [req.params.id]
+    );
+    if (r.rowCount === 0) return res.status(404).json({ error: "Escalation not found" });
+    res.json(r.rows[0]);
+  } catch (e) {
+    next(e);
+  }
+});
+
 // --- Report sub-resource (must be above /:id to avoid conflict) ---
 
-// GET /api/sessions/reports — all reports (counselor/admin)
+// GET /api/sessions/reports — counselors see only their sessions' reports; admin sees all
 router.get("/reports", verifyToken, requireRole("counselor", "admin"), async (req, res, next) => {
   try {
+    if (req.user.role === "counselor") {
+      const q = `
+        select r.* from reports r
+        join sessions s on r.session_id = s.id
+        where s.counselor_id = $1
+        order by r.created_at desc
+      `;
+      const r = await pool.query(q, [req.user.id]);
+      return res.json({ data: r.rows });
+    }
+
     const q = `select * from reports order by created_at desc`;
     const r = await pool.query(q);
     res.json({ data: r.rows });
@@ -106,20 +175,21 @@ router.get("/:id", async (req, res, next) => {
 });
 
 // POST /api/sessions/:id/assign
-// body: { counselor_id }
-router.post("/:id/assign", async (req, res, next) => {
+// body: { counselor_id } — counselors are forced to self-assign
+router.post("/:id/assign", verifyToken, requireRole("counselor", "admin"), async (req, res, next) => {
   try {
-    const { counselor_id } = req.body || {};
+    // Counselors can only assign themselves, admins can assign anyone
+    const counselor_id = req.user.role === "counselor" ? req.user.id : (req.body?.counselor_id);
     if (!counselor_id) return res.status(400).json({ error: "counselor_id is required" });
 
     const q = `
       update sessions
       set counselor_id = $2, status = 'matched', matched_at = now()
-      where id = $1
+      where id = $1 and status = 'waiting'
       returning *
     `;
     const r = await pool.query(q, [req.params.id, counselor_id]);
-    if (r.rowCount === 0) return res.status(404).json({ error: "Session not found" });
+    if (r.rowCount === 0) return res.status(404).json({ error: "Session not found or already assigned" });
 
     const io = req.app.get("io");
     if (io) io.to(req.params.id).emit("session_matched", { sessionId: req.params.id });
@@ -131,16 +201,23 @@ router.post("/:id/assign", async (req, res, next) => {
 });
 
 // POST /api/sessions/:id/close
-router.post("/:id/close", async (req, res, next) => {
+router.post("/:id/close", verifyToken, requireRole("counselor", "admin"), async (req, res, next) => {
   try {
-    const q = `
-      update sessions
-      set status = 'closed', closed_at = now()
-      where id = $1
-      returning *
-    `;
-    const r = await pool.query(q, [req.params.id]);
-    if (r.rowCount === 0) return res.status(404).json({ error: "Session not found" });
+    // Counselors can only close sessions assigned to them
+    let whereClause = `where id = $1`;
+    const params = [req.params.id];
+    if (req.user.role === "counselor") {
+      whereClause += ` and counselor_id = $2`;
+      params.push(req.user.id);
+    }
+
+    const q = `update sessions set status = 'closed', closed_at = now() ${whereClause} returning *`;
+    const r = await pool.query(q, params);
+    if (r.rowCount === 0) return res.status(404).json({ error: "Session not found or access denied" });
+
+    const io = req.app.get("io");
+    if (io) io.to(req.params.id).emit("session_ended", { sessionId: req.params.id });
+
     res.json(r.rows[0]);
   } catch (e) {
     next(e);
@@ -234,6 +311,14 @@ router.post("/:id/messages", async (req, res, next) => {
           [req.params.id, message.id, risk.level, risk.score, risk.reasons]
         );
         flag = flagR.rows[0];
+
+        if (risk.level === "high") {
+          await client.query(
+            `insert into escalations (session_id, message_id, level, status)
+             values ($1, $2, 'high', 'open')`,
+            [req.params.id, message.id]
+          );
+        }
       }
     }
 
@@ -269,10 +354,32 @@ router.post("/:id/summarize", async (req, res, next) => {
 
     try {
       const result = await summarizeSession(messages);
+
       await pool.query(
         `update sessions set topic = coalesce($2, topic) where id = $1`,
         [req.params.id, result.topic]
       );
+
+      // Simpan atau update ringkasan di session_summaries
+      const existing = await pool.query(
+        `select id from session_summaries where session_id = $1 limit 1`,
+        [req.params.id]
+      );
+      if (existing.rowCount > 0) {
+        await pool.query(
+          `update session_summaries
+           set ai_summary = $2, counselor_suggestion = $3, updated_at = now()
+           where session_id = $1`,
+          [req.params.id, result.summary, result.topic]
+        );
+      } else {
+        await pool.query(
+          `insert into session_summaries (session_id, ai_summary, counselor_suggestion)
+           values ($1, $2, $3)`,
+          [req.params.id, result.summary, result.topic]
+        );
+      }
+
       res.json(result);
     } catch (aiErr) {
       const msg = aiErr.message || "";

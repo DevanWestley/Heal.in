@@ -29,17 +29,19 @@ router.post("/register", async (req, res, next) => {
     const userRole = role === "admin" ? "admin" : "counselor";
 
     if (userRole === "counselor") {
+      const { email } = req.body;
+      if (!email) return res.status(400).json({ error: "Email wajib diisi untuk pendaftaran konselor" });
+
       const q = `
         insert into counselors (name, email, specialization, is_active, is_available, display_name, password_hash)
-        values ($1, $2, 'General', true, true, $1, $3)
+        values ($1, $2, 'General', false, false, $1, $3)
         returning id, name as username, 'counselor' as role, created_at
       `;
-      // Use username as placeholder email if not provided
-      const email = req.body.email || `${username}@healin.local`;
       const r = await pool.query(q, [username, email, passwordHash]);
-      const user = r.rows[0];
-      const token = generateToken(user);
-      return res.status(201).json({ token, user });
+      return res.status(201).json({
+        message: "Pendaftaran berhasil. Akun kamu sedang menunggu persetujuan admin sebelum bisa login.",
+        user: { id: r.rows[0].id, username: r.rows[0].username },
+      });
     }
 
     // admin
@@ -55,7 +57,10 @@ router.post("/register", async (req, res, next) => {
     res.status(201).json({ token, user });
   } catch (e) {
     if (e.code === "23505") {
-      return res.status(409).json({ error: "Username already exists" });
+      if (e.constraint?.includes("email")) {
+        return res.status(409).json({ error: "Email sudah terdaftar" });
+      }
+      return res.status(409).json({ error: "Username sudah terdaftar" });
     }
     next(e);
   }
@@ -73,9 +78,9 @@ router.post("/login", async (req, res, next) => {
 
     // Check counselors table first (name field)
     const counselorQ = `
-      select id, name as username, 'counselor' as role, password_hash, created_at
+      select id, name as username, 'counselor' as role, password_hash, is_active, created_at
       from counselors
-      where name = $1 and is_active = true
+      where name = $1
       limit 1
     `;
     const counselorR = await pool.query(counselorQ, [username]);
@@ -87,7 +92,11 @@ router.post("/login", async (req, res, next) => {
       }
       const valid = await bcrypt.compare(password, counselor.password_hash);
       if (!valid) return res.status(401).json({ error: "Invalid credentials" });
+      if (!counselor.is_active) {
+        return res.status(403).json({ error: "Akun kamu belum diaktifkan. Hubungi admin untuk persetujuan." });
+      }
       delete counselor.password_hash;
+      delete counselor.is_active;
       const token = generateToken(counselor);
       return res.json({ token, user: counselor });
     }
